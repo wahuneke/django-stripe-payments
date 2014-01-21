@@ -78,6 +78,7 @@ class Event(StripeObject):
     validated_message = JSONField(null=True)
     valid = models.NullBooleanField(null=True)
     processed = models.BooleanField(default=False)
+    stripe_connect = models.ForeignKey(ConnectUser, blank=True)
 
     @property
     def message(self):
@@ -103,6 +104,16 @@ class Event(StripeObject):
                 self.customer = Customer.objects.get(stripe_id=cus_id)
                 self.save()
             except Customer.DoesNotExist:
+                pass
+
+    def link_stripe_connect(self):
+        connect_id = self.message["data"]["object"].get("user_id", None)
+
+        if connect_id is not None:
+            try:
+                self.stripe_connect = ConnectUser.objects.get(user_id=connect_id)
+                self.save()
+            except ConnectUser.DoesNotExist:
                 pass
 
     def validate(self):
@@ -163,6 +174,10 @@ class Event(StripeObject):
                 if not self.kind.startswith("plan.") and \
                         not self.kind.startswith("transfer."):
                     self.link_customer()
+
+                if not self.stripe_connect:
+                    self.link_stripe_connect()
+
                 if self.kind.startswith("invoice."):
                     Invoice.handle_event(self)
                 elif self.kind.startswith("charge."):
@@ -227,6 +242,7 @@ class Transfer(StripeObject):
     refund_gross = models.DecimalField(decimal_places=2, max_digits=7, null=True)
     validation_count = models.IntegerField(null=True)
     validation_fees = models.DecimalField(decimal_places=2, max_digits=7, null=True)
+    stripe_connect = models.ForeignKey(ConnectUser, blank=True)
 
     objects = TransferManager()
 
@@ -275,6 +291,10 @@ class Transfer(StripeObject):
                 event=event,
                 defaults=defaults
             )
+
+        if event.stripe_connect:
+            obj.stripe_connect = event.stripe_connect
+
         if created and summary:
             for fee in summary.get("charge_fee_details", []):
                 obj.charge_fee_details.create(
@@ -569,31 +589,67 @@ class Customer(StripeObject):
         subscription_made.send(sender=self, plan=plan, stripe_response=resp)
         return resp
 
+    def get_card_token(self, stripe_connect=None):
+        if stripe_connect and isinstance(stripe_connect, ConnectUser):
+            return stripe.Token.create(customer=self.stripe_id, api_key=stripe_connect.stripe_access_token)
+        else:
+            return stripe.Token.create(customer=self.stripe_id)
+
     def charge(self, amount, currency="usd", description=None,
-               send_receipt=True):
+               send_receipt=True, application_fee=None,
+               stripe_connect_user=None):
         """
-        This method expects `amount` to be a Decimal type representing a
+        This method expects `amount` and 'application_fee' to be a Decimal type representing a
         dollar amount. It will be converted to cents so any decimals beyond
         two will be ignored.
         """
-        if not isinstance(amount, decimal.Decimal):
+        if not isinstance(amount, decimal.Decimal) or (not application_fee is None and not isinstance(application_fee, decimal.Decimal)):
             raise ValueError(
-                "You must supply a decimal value representing dollars."
+                "You must supply a decimal value representing dollars for amount and for application_fee (if supplied)."
             )
-        resp = stripe.Charge.create(
-            amount=int(amount * 100),  # Convert dollars into cents
-            currency=currency,
-            customer=self.stripe_id,
-            description=description,
-        )
-        obj = self.record_charge(resp["id"])
+        charge_args = {
+            'amount': int(amount * 100),
+            'currency': currency,
+            'description': description,
+            'card': self.get_card_token(stripe_connect_user),
+        }
+
+        if stripe_connect_user and isinstance(stripe_connect_user, ConnectUser):
+            charge_args['api_key'] = stripe_connect_user.stripe_access_token
+
+        if application_fee:
+            charge_args['application_fee'] = int(application_fee * 100)
+
+        resp = stripe.Charge.create(**charge_args)
+        obj = self.record_charge(resp["id"], stripe_connect_user)
         if send_receipt:
             obj.send_receipt()
         return obj
 
-    def record_charge(self, charge_id):
-        data = stripe.Charge.retrieve(charge_id)
+    def record_charge(self, charge_id, stripe_connect_user=None):
+        if stripe_connect_user and isinstance(stripe_connect_user, ConnectUser):
+            data = stripe.Charge.retrieve(charge_id, api_key=stripe_connect_user.stripe_access_token)
+        else:
+            data = stripe.Charge.retrieve(charge_id)
         return Charge.sync_from_stripe_data(data)
+
+
+class ConnectUser(StripeObject):
+    """
+    A user in your system who you may be routing payments to through "Stripe Connect"
+    """
+    user = models.OneToOneField(
+        getattr(settings, "AUTH_USER_MODEL", "auth.User"),
+        null=True
+    )
+    # when a webhook is received for an action related to a ConnectUser, a 'user_id' will be provided
+    # This is the same as an account id
+    user_id = models.CharField(max_length=100)
+    stripe_access_token = models.CharField(max_length=100)
+    stripe_publishable_key = models.CharField(max_length=100)
+
+    def __unicode__(self):
+        return unicode(self.user)
 
 
 class CurrentSubscription(models.Model):
@@ -671,6 +727,7 @@ class Invoice(models.Model):
     date = models.DateTimeField()
     charge = models.CharField(max_length=50, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
+    stripe_connect = models.ForeignKey(ConnectUser, blank=True)
 
     class Meta:  # pylint: disable=E0012,C1001
         ordering = ["-date"]
@@ -688,7 +745,7 @@ class Invoice(models.Model):
         return "Open"
 
     @classmethod
-    def sync_from_stripe_data(cls, stripe_invoice, send_receipt=True):
+    def sync_from_stripe_data(cls, stripe_invoice, send_receipt=True, stripe_connect=None):
         c = Customer.objects.get(stripe_id=stripe_invoice["customer"])
         period_end = convert_tstamp(stripe_invoice, "period_end")
         period_start = convert_tstamp(stripe_invoice, "period_start")
@@ -707,7 +764,8 @@ class Invoice(models.Model):
                 subtotal=stripe_invoice["subtotal"] / decimal.Decimal("100"),
                 total=stripe_invoice["total"] / decimal.Decimal("100"),
                 date=date,
-                charge=stripe_invoice.get("charge") or ""
+                charge=stripe_invoice.get("charge") or "",
+                stripe_connect=stripe_connect
             )
         )
         if not created:
@@ -722,6 +780,7 @@ class Invoice(models.Model):
             invoice.total = stripe_invoice["total"] / decimal.Decimal("100")
             invoice.date = date
             invoice.charge = stripe_invoice.get("charge") or ""
+            invoice.stripe_connect = stripe_connect
             invoice.save()
 
         for item in stripe_invoice["lines"].get("data", []):
@@ -773,7 +832,7 @@ class Invoice(models.Model):
         if event.kind in valid_events:
             invoice_data = event.message["data"]["object"]
             stripe_invoice = stripe.Invoice.retrieve(invoice_data["id"])
-            cls.sync_from_stripe_data(stripe_invoice, send_receipt=send_receipt)
+            cls.sync_from_stripe_data(stripe_invoice, send_receipt=send_receipt, stripe_connect=event.stripe_connect)
 
 
 class InvoiceItem(models.Model):
@@ -814,6 +873,7 @@ class Charge(StripeObject):
     fee = models.DecimalField(decimal_places=2, max_digits=7, null=True)
     receipt_sent = models.BooleanField(default=False)
     charge_created = models.DateTimeField(null=True, blank=True)
+    stripe_connect = models.ForeignKey(ConnectUser, blank=True)
 
     objects = ChargeManager()
 
@@ -858,6 +918,9 @@ class Charge(StripeObject):
             obj.amount_refunded = (data["amount_refunded"] / decimal.Decimal("100"))
         if data["refunded"]:
             obj.amount_refunded = (data["amount"] / decimal.Decimal("100"))
+        user_id = data.get("user_id", None)
+        if user_id and ConnectUser.objects.filter(user_id=user_id).exists():
+            obj.stripe_connect = ConnectUser.objects.get(user_id=user_id)
         obj.save()
         return obj
 
