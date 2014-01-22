@@ -854,7 +854,7 @@ class InvoiceItem(models.Model):
 
 class Charge(StripeObject):
 
-    customer = models.ForeignKey(Customer, related_name="charges")
+    customer = models.ForeignKey(Customer, related_name="charges", blank=True)
     invoice = models.ForeignKey(Invoice, null=True, related_name="charges")
     card_last_4 = models.CharField(max_length=4, blank=True)
     card_kind = models.CharField(max_length=50, blank=True)
@@ -894,12 +894,14 @@ class Charge(StripeObject):
 
     @classmethod
     def sync_from_stripe_data(cls, data):
-        customer = Customer.objects.get(stripe_id=data["customer"])
-        obj, _ = customer.charges.get_or_create(
+        obj, _ = Charge.objects.get_or_create(
             stripe_id=data["id"]
         )
+        customer_id = data.get("customer", None);
+        customer = Customer.objects.get(stripe_id=customer_id) if customer_id else None
+        obj.customer = customer
         invoice_id = data.get("invoice", None)
-        if obj.customer.invoices.filter(stripe_id=invoice_id).exists():
+        if Invoice.objects.filter(stripe_id=invoice_id).exists():
             obj.invoice = obj.customer.invoices.get(stripe_id=invoice_id)
         obj.card_last_4 = data["card"]["last4"]
         obj.card_kind = data["card"]["type"]
@@ -923,7 +925,7 @@ class Charge(StripeObject):
         return obj
 
     def send_receipt(self):
-        if not self.receipt_sent:
+        if not self.receipt_sent and self.customer:
             site = Site.objects.get_current()
             protocol = getattr(settings, "DEFAULT_HTTP_PROTOCOL", "http")
             ctx = {
@@ -942,3 +944,30 @@ class Charge(StripeObject):
             ).send()
             self.receipt_sent = num_sent > 0
             self.save()
+
+    @classmethod
+    def create(cls, card, amount, currency="usd", description=None, application_fee=None, stripe_connect_user=None):
+        """
+        This method expects `amount` and 'application_fee' to be a Decimal type representing a
+        dollar amount. It will be converted to cents so any decimals beyond
+        two will be ignored.
+        """
+        if not isinstance(amount, decimal.Decimal) or (not application_fee is None and not isinstance(application_fee, decimal.Decimal)):
+            raise ValueError(
+                "You must supply a decimal value representing dollars for amount and for application_fee (if supplied)."
+            )
+        charge_args = {
+            'amount': int(amount * 100),
+            'currency': currency,
+            'description': description,
+            'card': card,
+        }
+
+        if stripe_connect_user and isinstance(stripe_connect_user, ConnectUser):
+            charge_args['api_key'] = stripe_connect_user.stripe_access_token
+
+        if application_fee:
+            charge_args['application_fee'] = int(application_fee * 100)
+
+        resp = stripe.Charge.create(**charge_args)
+        return Charge.sync_from_stripe_data(resp)
