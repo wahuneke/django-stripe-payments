@@ -78,7 +78,7 @@ class Event(StripeObject):
     validated_message = JSONField(null=True)
     valid = models.NullBooleanField(null=True)
     processed = models.BooleanField(default=False)
-    stripe_connect = models.ForeignKey('ConnectUser', blank=True)
+    stripe_connect = models.ForeignKey('ConnectUser', null=True)
 
     @property
     def message(self):
@@ -111,7 +111,7 @@ class Event(StripeObject):
 
         if connect_id is not None:
             try:
-                self.stripe_connect = ConnectUser.objects.get(user_id=connect_id)
+                self.stripe_connect = ConnectUser.objects.get(account_id=connect_id)
                 self.save()
             except ConnectUser.DoesNotExist:
                 pass
@@ -242,7 +242,7 @@ class Transfer(StripeObject):
     refund_gross = models.DecimalField(decimal_places=2, max_digits=7, null=True)
     validation_count = models.IntegerField(null=True)
     validation_fees = models.DecimalField(decimal_places=2, max_digits=7, null=True)
-    stripe_connect = models.ForeignKey('ConnectUser', blank=True)
+    stripe_connect = models.ForeignKey('ConnectUser', null=True)
 
     objects = TransferManager()
 
@@ -642,7 +642,7 @@ class ConnectUser(StripeObject):
     )
     # when a webhook is received for an action related to a ConnectUser, a 'user_id' will be provided
     # This is the same as an account id
-    user_id = models.CharField(max_length=100)
+    account_id = models.CharField(max_length=100)
     stripe_access_token = models.CharField(max_length=100)
     stripe_publishable_key = models.CharField(max_length=100)
 
@@ -725,7 +725,7 @@ class Invoice(models.Model):
     date = models.DateTimeField()
     charge = models.CharField(max_length=50, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
-    stripe_connect = models.ForeignKey(ConnectUser, blank=True)
+    stripe_connect = models.ForeignKey(ConnectUser, null=True)
 
     class Meta:  # pylint: disable=E0012,C1001
         ordering = ["-date"]
@@ -854,7 +854,7 @@ class InvoiceItem(models.Model):
 
 class Charge(StripeObject):
 
-    customer = models.ForeignKey(Customer, related_name="charges", blank=True)
+    customer = models.ForeignKey(Customer, related_name="charges", null=True)
     invoice = models.ForeignKey(Invoice, null=True, related_name="charges")
     card_last_4 = models.CharField(max_length=4, blank=True)
     card_kind = models.CharField(max_length=50, blank=True)
@@ -871,7 +871,7 @@ class Charge(StripeObject):
     fee = models.DecimalField(decimal_places=2, max_digits=7, null=True)
     receipt_sent = models.BooleanField(default=False)
     charge_created = models.DateTimeField(null=True, blank=True)
-    stripe_connect = models.ForeignKey(ConnectUser, blank=True)
+    stripe_connect = models.ForeignKey(ConnectUser, null=True)
 
     objects = ChargeManager()
 
@@ -919,8 +919,8 @@ class Charge(StripeObject):
         if data["refunded"]:
             obj.amount_refunded = (data["amount"] / decimal.Decimal("100"))
         user_id = data.get("user_id", None)
-        if user_id and ConnectUser.objects.filter(user_id=user_id).exists():
-            obj.stripe_connect = ConnectUser.objects.get(user_id=user_id)
+        if user_id and ConnectUser.objects.filter(account_id=user_id).exists():
+            obj.stripe_connect = ConnectUser.objects.get(account_id=user_id)
         obj.save()
         return obj
 
@@ -965,6 +965,8 @@ class Charge(StripeObject):
 
         if stripe_connect_user and isinstance(stripe_connect_user, ConnectUser):
             charge_args['api_key'] = stripe_connect_user.stripe_access_token
+        elif stripe_connect_user:
+            charge_args['api_key'] = stripe_connect_user
 
         if application_fee:
             charge_args['application_fee'] = int(application_fee * 100)
