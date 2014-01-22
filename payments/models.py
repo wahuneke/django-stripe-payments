@@ -78,7 +78,7 @@ class Event(StripeObject):
     validated_message = JSONField(null=True)
     valid = models.NullBooleanField(null=True)
     processed = models.BooleanField(default=False)
-    stripe_connect = models.ForeignKey(ConnectUser, blank=True)
+    stripe_connect = models.ForeignKey('ConnectUser', blank=True)
 
     @property
     def message(self):
@@ -242,7 +242,7 @@ class Transfer(StripeObject):
     refund_gross = models.DecimalField(decimal_places=2, max_digits=7, null=True)
     validation_count = models.IntegerField(null=True)
     validation_fees = models.DecimalField(decimal_places=2, max_digits=7, null=True)
-    stripe_connect = models.ForeignKey(ConnectUser, blank=True)
+    stripe_connect = models.ForeignKey('ConnectUser', blank=True)
 
     objects = TransferManager()
 
@@ -589,11 +589,6 @@ class Customer(StripeObject):
         subscription_made.send(sender=self, plan=plan, stripe_response=resp)
         return resp
 
-    def get_card_token(self, stripe_connect=None):
-        if stripe_connect and isinstance(stripe_connect, ConnectUser):
-            return stripe.Token.create(customer=self.stripe_id, api_key=stripe_connect.stripe_access_token)
-        else:
-            return stripe.Token.create(customer=self.stripe_id)
 
     def charge(self, amount, currency="usd", description=None,
                send_receipt=True, application_fee=None,
@@ -611,11 +606,14 @@ class Customer(StripeObject):
             'amount': int(amount * 100),
             'currency': currency,
             'description': description,
-            'card': self.get_card_token(stripe_connect_user),
         }
 
+
         if stripe_connect_user and isinstance(stripe_connect_user, ConnectUser):
+            charge_args['card'] = stripe.Token.create(customer=self.stripe_id, api_key=stripe_connect_user.stripe_access_token)
             charge_args['api_key'] = stripe_connect_user.stripe_access_token
+        else:
+            charge_args['customer'] = self.stripe_id
 
         if application_fee:
             charge_args['application_fee'] = int(application_fee * 100)
