@@ -646,6 +646,11 @@ class ConnectUser(StripeObject):
     stripe_access_token = models.CharField(max_length=100)
     stripe_publishable_key = models.CharField(max_length=100)
 
+    @staticmethod
+    def account_id_lookup(stripe_access_token):
+        data = stripe.Account.retrieve(api_key=stripe_access_token)
+        return data.get('id', None)
+
     def __unicode__(self):
         return unicode(self.user)
 
