@@ -632,7 +632,7 @@ class Customer(StripeObject):
         return Charge.sync_from_stripe_data(data)
 
 
-class ConnectUser(StripeObject):
+class ConnectUser(models.Model):
     """
     A user in your system who you may be routing payments to through "Stripe Connect"
     """

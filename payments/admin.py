@@ -9,7 +9,8 @@ from .models import (
     EventProcessingException,
     Invoice,
     InvoiceItem,
-    Transfer
+    Transfer,
+    ConnectUser,
 )
 from .utils import get_user_model
 
@@ -283,5 +284,13 @@ admin.site.register(
     search_fields=[
         "stripe_id",
         "event__stripe_id"
+    ]
+)
+
+
+admin.site.register(
+    ConnectUser,
+    search_fields=[
+        "user__username",
     ]
 )
